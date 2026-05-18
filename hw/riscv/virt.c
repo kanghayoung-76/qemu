@@ -1809,8 +1809,15 @@ static void virt_machine_init(MachineState *machine)
     
     sysbus_create_simple("my-device", memmap[VIRT_MY_DEVICE].base,
                          qdev_get_gpio_in(mmio_irqchip, MY_DEVICE_IRQ));
-    DeviceState* mydev = sysbus_create_simple("mydev-dma", memmap[VIRT_MYDEV_DMA].base,
-                         qdev_get_gpio_in(mmio_irqchip, MYDEV_DMA_IRQ));
+    /* Create mydev with device_wid = VIRT_WG_TRUSTEDWID-1 (OS world = 6).
+     * DMA transactions are tagged with this WID and checked by WGC_DRAM.
+     * EPM (WID=1 only) → DMA from WID=6 device will be blocked by WGC. */
+    DeviceState *mydev = qdev_new("mydev-dma");
+    qdev_prop_set_uint32(mydev, "device-wid", VIRT_WG_TRUSTEDWID - 1);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(mydev), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(mydev), 0, memmap[VIRT_MYDEV_DMA].base);
+    sysbus_connect_irq(SYS_BUS_DEVICE(mydev), 0,
+                       qdev_get_gpio_in(mmio_irqchip, MYDEV_DMA_IRQ));
 
     if (mydev == NULL) {
         error_report("create mydev failed\n");

@@ -1,6 +1,8 @@
-/* 
- * Simple sysbus device that performs DMA to/from guest memory using
- * cpu_physical_memory_read/write and raises an IRQ when complete.
+/*
+ * Simple sysbus device that performs DMA to/from guest memory.
+ * DMA transactions are tagged with device_wid and routed through
+ * the WGC IOMMU (address_space_memory), simulating a WGmarker in
+ * front of the device — just like CPU harts have WGmarkers.
  */
 
 #include "qemu/osdep.h"
@@ -8,7 +10,8 @@
 #include "qapi/error.h"
 #include "qemu/log.h"
 #include "hw/hw.h"
-#include "exec/memory.h"       /* cpu_physical_memory_read/write */
+#include "exec/memory.h"
+#include "exec/address-spaces.h"  /* address_space_memory */
 #include "qemu/module.h"
 #include "qemu/typedefs.h"
 #include "hw/irq.h"
@@ -55,6 +58,9 @@ typedef struct {
     uint32_t status;
 
     qemu_irq irq;             /* irq line to guest */
+
+    /* WGmarker: WID stamped on all DMA bus transactions */
+    uint32_t device_wid;
 
     /* convenience */
     SysBusDevice *sbd;
@@ -104,7 +110,6 @@ static uint64_t mydev_read(void *opaque, hwaddr offset, unsigned size)
 static void perform_dma_device_to_guest(MyDevDMAState *s)
 {
     s->status = 1;
-    /* copy from host_buf -> guest physical memory at s->dma_gpa */
     hwaddr gpa = s->dma_gpa;
     size_t len = s->dma_len;
     if (!len || len > s->host_buf_size) {
@@ -112,10 +117,26 @@ static void perform_dma_device_to_guest(MyDevDMAState *s)
         return;
     }
 
-    /* This writes directly into guest physical memory. */
-    cpu_physical_memory_write(gpa, s->host_buf, len);
+    /*
+     * WGmarker: tag the DMA transaction with device_wid.
+     * address_space_memory routes DRAM accesses through the WGC IOMMU
+     * (create_wgc replaced the raw DRAM region with the WGC upstream).
+     * riscv_wgc_translate() will check: does device_wid have write
+     * permission for gpa?  If not → WGC fault, MEMTX_ERROR returned.
+     */
+    MemTxAttrs attrs = {};
+    attrs.world_id = s->device_wid;
+    MemTxResult res = address_space_write(&address_space_memory,
+                                         gpa, attrs, s->host_buf, len);
+    if (res != MEMTX_OK) {
+        printf("[QEMU] mydev_dma: WGC BLOCKED device->guest DMA "
+               "(WID=%u gpa=0x%"HWADDR_PRIx")\n", s->device_wid, gpa);
+        s->status = 3; /* error */
+        mydev_set_irq(s);
+        return;
+    }
 
-    s->status = 0; /* success */
+    s->status = 0;
     mydev_set_irq(s);
 }
 
@@ -128,11 +149,18 @@ static void perform_dma_guest_to_device(MyDevDMAState *s)
         s->status = 3;
         return;
     }
-    
 
-    /* read guest physical memory into device buffer */
-    cpu_physical_memory_read(gpa, s->host_buf, len);
-    
+    /* WGmarker: tag read transaction with device_wid, go through WGC */
+    MemTxAttrs attrs = {};
+    attrs.world_id = s->device_wid;
+    MemTxResult res = address_space_read(&address_space_memory,
+                                        gpa, attrs, s->host_buf, len);
+    if (res != MEMTX_OK) {
+        printf("[QEMU] mydev_dma: WGC BLOCKED guest->device DMA "
+               "(WID=%u gpa=0x%"HWADDR_PRIx")\n", s->device_wid, gpa);
+        s->status = 3;
+        return;
+    }
 
     s->status = 0;
 }
@@ -239,12 +267,20 @@ static void mydevice_uninit(Object *obj)
     g_free(s->host_buf);
 }
 
+static Property mydevice_properties[] = {
+    /* WGmarker WID: stamped on every DMA bus transaction.
+     * Default 6 = OS world (host Linux); SM is WID 7, enclave is WID 1. */
+    DEFINE_PROP_UINT32("device-wid", MyDevDMAState, device_wid, 6),
+    DEFINE_PROP_END_OF_LIST(),
+};
+
 static void mydevice_class_init(ObjectClass *oc, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     dc->realize = mydevice_realize;
     dc->desc = "Simple DMA-capable test device";
     dc->vmsd = NULL;
+    device_class_set_props(dc, mydevice_properties);
 
     ResettableClass *rc = RESETTABLE_CLASS(oc);
     rc->phases.enter = mydevice_reset;
