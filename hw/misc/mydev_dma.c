@@ -269,8 +269,9 @@ static void mydevice_uninit(Object *obj)
 
 static Property mydevice_properties[] = {
     /* WGmarker WID: stamped on every DMA bus transaction.
-     * Default 6 = OS world (host Linux); SM is WID 7, enclave is WID 1. */
-    DEFINE_PROP_UINT32("device-wid", MyDevDMAState, device_wid, 6),
+     * Default 29 = my_dev WID; SM is WID 31 (trusted), host Linux is WID 30,
+     * my_dev is WID 29, enclave WIDs use 0-28. */
+    DEFINE_PROP_UINT32("device-wid", MyDevDMAState, device_wid, 29),
     DEFINE_PROP_END_OF_LIST(),
 };
 
