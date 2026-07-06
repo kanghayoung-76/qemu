@@ -221,7 +221,7 @@ static void mydevice_reset(Object *obj, ResetType type)
     s->dma_len = 0;
     s->cmd = 0;
     s->status = 0;
-    memset(s->host_buf, 1, s->host_buf_size);
+    snprintf((char *)s->host_buf, s->host_buf_size, "Hello from mydev!");
 }
 
 

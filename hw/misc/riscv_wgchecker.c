@@ -115,20 +115,34 @@ static IOMMUAccessFlags wgc_perm_to_iommu_flags(int wgc_perm)
 
 static void wgchecker_iommu_notify_all(RISCVWgCheckerState *s)
 {
-    /*
-     * Do tlb_flush() to whole address space via memory_region_notify_iommu()
-     * when wgChecker changes it's config.
-     */
+    trace_riscv_wgc_iommu_notify_all();
 
+    /*
+     * In MTTCG, memory_region_notify_iommu() eventually calls
+     * tcg_iommu_unmap_notify() which calls tlb_flush(notifier->cpu).
+     * tlb_flush() requires the caller to be on the target CPU's own thread
+     * (assert_cpu_is_self), so calling it cross-CPU causes a data race on
+     * the TLB structures.
+     *
+     * When called from a vCPU context (MMIO write handler), use
+     * tlb_flush_all_cpus_synced() instead. This posts an async flush work
+     * item to each other CPU's queue (processed safely on their own thread)
+     * and an exclusive flush to the current CPU (creating a sync point so all
+     * flushes complete before the next TB executes on this CPU).
+     */
+    if (current_cpu) {
+        tlb_flush_all_cpus_synced(current_cpu);
+        return;
+    }
+
+    /* Non-vCPU context (e.g. device init): fall back to IOMMU notifier path */
     IOMMUTLBEvent event = {
         .entry = {
             .addr_mask = -1ULL,
         }
     };
 
-    trace_riscv_wgc_iommu_notify_all();
-
-    for (int i=0; i<WGC_NUM_REGIONS; i++) {
+    for (int i = 0; i < WGC_NUM_REGIONS; i++) {
         WgCheckerRegion *region = &s->mem_regions[i];
         uint32_t nworlds = worldguard_config->nworlds;
 
@@ -140,7 +154,7 @@ static void wgchecker_iommu_notify_all(RISCVWgCheckerState *s)
         event.type = IOMMU_NOTIFIER_UNMAP;
         event.entry.perm = IOMMU_NONE;
 
-        for (int wid=0; wid<nworlds; wid++) {
+        for (int wid = 0; wid < nworlds; wid++) {
             memory_region_notify_iommu(&region->upstream, wid, event);
         }
     }
